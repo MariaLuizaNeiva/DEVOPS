@@ -32,7 +32,7 @@ jobs:
 
       - name: Rodar testes automatizados com cobertura
         run: |
-          pytest --cov=app --cov-report=term-missing tests/
+          python -m pytest --cov=app --cov-report=term-missing tests/
 
       - name: Build da imagem Docker (validação de conteinerização)
         run: |
