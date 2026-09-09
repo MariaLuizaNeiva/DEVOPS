@@ -113,3 +113,5 @@ git push -u origin main
 ```
 
 Depois disso, configure as regras de proteção de branch descritas na seção 3, e passe a trabalhar sempre via branches de feature + Pull Request.
+
+Isso é um teste.
