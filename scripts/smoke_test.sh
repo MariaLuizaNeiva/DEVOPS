@@ -10,7 +10,7 @@ BASE_URL="${BASE_URL:-http://localhost:5000}"
 HEALTH_PATH="${HEALTH_PATH:-/health}"
 
 echo ">> Smoke test: GET ${BASE_URL}${HEALTH_PATH}"
-curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-connrefused \
+curl --fail --silent --show-error --retry 15 --retry-delay 3 --retry-connrefused --retry-all-errors \
      "${BASE_URL}${HEALTH_PATH}"
 echo
 

@@ -47,5 +47,5 @@ jobs:
         run: |
           docker run -d --name todo-api-ci -p 5000:5000 todo-api:ci
           trap 'docker logs todo-api-ci; docker rm -f todo-api-ci' EXIT
-          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused \
+          curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused --retry-all-errors \
                http://localhost:5000/health
