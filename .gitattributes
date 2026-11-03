@@ -1,0 +1,3 @@
+# Garante quebras de linha LF nos scripts (evita erro no runner Linux quando editados no Windows)
+*.sh text eol=lf
+Dockerfile text eol=lf

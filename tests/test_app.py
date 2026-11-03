@@ -1,17 +1,20 @@
 """
 Testes automatizados (unitários/integração) da API de Tarefas.
 Executados automaticamente pelo pipeline de CI a cada push/PR.
+Sem DATABASE_URL, a API usa armazenamento em memória (não precisa de banco no CI).
 """
 import pytest
-from app import app, tasks
+
+import app as app_module
+from app import app, storage
 
 
 @pytest.fixture(autouse=True)
 def reset_state():
     """Garante que cada teste começa com o estado limpo."""
-    tasks.clear()
+    storage.clear()
     yield
-    tasks.clear()
+    storage.clear()
 
 
 @pytest.fixture
@@ -25,6 +28,22 @@ def test_health_check(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
+
+
+def test_health_check_returns_503_when_storage_is_down(client, monkeypatch):
+    monkeypatch.setattr(storage, "ping", lambda: False)
+    response = client.get("/health")
+    assert response.status_code == 503
+    assert response.get_json() == {"status": "unavailable"}
+
+
+def test_version_endpoint(client, monkeypatch):
+    monkeypatch.setattr(app_module, "APP_VERSION", "1.2.3")
+    response = client.get("/version")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["version"] == "1.2.3"
+    assert data["storage"] == "memory"
 
 
 def test_list_tasks_empty(client):
@@ -71,12 +90,22 @@ def test_update_task(client):
     assert data["done"] is True
 
 
+def test_update_nonexistent_task_returns_404(client):
+    response = client.put("/tasks/999", json={"done": True})
+    assert response.status_code == 404
+
+
 def test_delete_task(client):
     created = client.post("/tasks", json={"title": "Tarefa temporária"}).get_json()
     response = client.delete(f"/tasks/{created['id']}")
     assert response.status_code == 204
 
     response = client.get(f"/tasks/{created['id']}")
+    assert response.status_code == 404
+
+
+def test_delete_nonexistent_task_returns_404(client):
+    response = client.delete("/tasks/999")
     assert response.status_code == 404
 
 
