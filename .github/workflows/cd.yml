@@ -1,0 +1,165 @@
+name: CD - Publicar imagem e Deploy
+
+# Disparado ao criar uma tag de versão semântica, ex.: v1.0.0
+#   git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # 1) Reaproveita o CI: só publica se build e testes passarem
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  # 2) Publica a imagem no GitHub Container Registry (GHCR) e cria a Release
+  publish:
+    name: Publicar imagem (GHCR)
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # criar a Release
+      packages: write     # publicar no GHCR
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Definir versão e nome da imagem
+        id: version
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          # nomes de imagem Docker precisam ser minúsculos
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no GHCR (usa o token automático, sem senha no código)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gerar tags semânticas da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build e push da imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.version }}
+
+      - name: Criar GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+
+  # 3) Deploy automático em homologação (simulado com Docker Compose no runner)
+  deploy-staging:
+    name: Deploy em homologação (simulado)
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VERSION: ${{ needs.publish.outputs.version }}
+      # Segredo vem do GitHub Secrets (nunca do código-fonte)
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      # Variável de repositório para simular uma release defeituosa (ver docs/ROLLBACK.md)
+      HEALTH_PATH: ${{ vars.SIMULATE_FAILURE == 'true' && '/rota-inexistente' || '/health' }}
+    steps:
+      - name: Checkout do código (com tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validar secrets e definir imagem
+        run: |
+          if [ -z "$POSTGRES_PASSWORD" ]; then
+            echo "::error::Secret POSTGRES_PASSWORD não configurado (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+          echo "APP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Descobrir versão anterior (alvo do rollback)
+        run: |
+          PREV="$(git tag --list 'v*.*.*' --sort=-v:refname | awk -v cur="v${VERSION}" 'f{print; exit} $0==cur{f=1}')"
+          echo "PREV=${PREV}" >> "$GITHUB_ENV"
+          echo "Versão atual: v${VERSION} | versão anterior: ${PREV:-nenhuma}"
+
+      - name: Estado inicial - sobe a versão anterior (simula ambiente já em execução)
+        if: env.PREV != ''
+        continue-on-error: true
+        run: |
+          bash scripts/deploy.sh "$PREV"
+          HEALTH_PATH=/health bash scripts/smoke_test.sh "$PREV"
+
+      - name: Deploy da nova versão e smoke test
+        id: release
+        continue-on-error: true
+        run: |
+          bash scripts/deploy.sh "$VERSION"
+          bash scripts/smoke_test.sh "$VERSION"
+
+      - name: Rollback automático para a versão anterior
+        if: steps.release.outcome == 'failure'
+        env:
+          HEALTH_PATH: /health
+        run: |
+          if [ -z "$PREV" ]; then
+            echo "::error::Falha no deploy e não existe versão anterior para rollback"
+            exit 1
+          fi
+          echo "::warning::Deploy de v${VERSION} falhou. Executando rollback para ${PREV}"
+          bash scripts/deploy.sh "$PREV"
+          bash scripts/smoke_test.sh "$PREV"
+          {
+            echo "### ⚠️ Rollback automático executado"
+            echo "- Versão com falha: \`v${VERSION}\`"
+            echo "- Versão restaurada: \`${PREV}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Resumo do deploy
+        if: steps.release.outcome == 'success'
+        run: |
+          {
+            echo "### ✅ Deploy concluído em homologação"
+            echo "- Versão: \`v${VERSION}\`"
+            echo "- Imagem: \`${APP_IMAGE}:${VERSION}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Marcar o release como falho (após o rollback)
+        if: steps.release.outcome == 'failure'
+        run: |
+          echo "A release v${VERSION} foi revertida e precisa de correção."
+          exit 1
+
+      - name: Limpar ambiente
+        if: always()
+        run: docker compose down -v || true

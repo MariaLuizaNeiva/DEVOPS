@@ -1,22 +1,36 @@
-# Imagem base leve com Python
+# syntax=docker/dockerfile:1
+
+# ---------- Estágio 1: build das dependências ----------
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+COPY requirements.txt .
+# Instala as dependências em um prefixo isolado (copiado depois para a imagem final)
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+# ---------- Estágio 2: imagem final (enxuta) ----------
 FROM python:3.11-slim
 
-# Diretório de trabalho dentro do container
+# Versão da aplicação (injetada no build pela pipeline de CD: --build-arg APP_VERSION=1.0.0)
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION} \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Usuário sem privilégios (boa prática de segurança: não rodar como root)
+RUN useradd --system --uid 10001 --no-create-home app
+
 WORKDIR /app
+COPY --from=builder /install /usr/local
+COPY app.py storage.py ./
 
-# Copia apenas o requirements primeiro (aproveita cache de camadas do Docker)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copia o restante do código-fonte
-COPY app.py .
-
-# Expõe a porta usada pela aplicação Flask
+USER app
 EXPOSE 5000
 
-# Variáveis de ambiente básicas
-ENV FLASK_APP=app.py
-ENV PYTHONUNBUFFERED=1
+# Healthcheck sem depender de curl (imagem slim não o possui)
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)" || exit 1
 
-# Comando padrão de inicialização
-CMD ["python", "app.py"]
+# Servidor de produção (gunicorn) no lugar do servidor de desenvolvimento do Flask
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]

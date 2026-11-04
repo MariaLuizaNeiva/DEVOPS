@@ -1,0 +1,43 @@
+# Orquestração local / ambiente de homologação: API + PostgreSQL
+#
+# Uso local:
+#   cp .env.example .env     (e edite a senha)
+#   docker compose up --build
+#
+# Em deploy, APP_IMAGE e APP_VERSION apontam para a imagem publicada no GHCR.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tasks}
+      POSTGRES_USER: ${POSTGRES_USER:-todo}
+      # Sem valor padrão de propósito: a senha vem do .env (local) ou dos Secrets (CI/CD)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD (arquivo .env ou Secret do GitHub)}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-todo} -d ${POSTGRES_DB:-tasks}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    image: ${APP_IMAGE:-todo-api}:${APP_VERSION:-local}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-local}
+    restart: unless-stopped
+    environment:
+      APP_VERSION: ${APP_VERSION:-local}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-todo}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-tasks}
+    ports:
+      - "5000:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

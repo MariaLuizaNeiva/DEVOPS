@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:   # permite que o pipeline de CD reutilize o CI antes de publicar
 
 jobs:
   build-and-test:
@@ -28,12 +29,23 @@ jobs:
       - name: Instalar dependências (build)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       - name: Rodar testes automatizados com cobertura
         run: |
           python -m pytest --cov=app --cov-report=term-missing tests/
 
-      - name: Build da imagem Docker (validação de conteinerização)
+      - name: Validar docker-compose.yml
+        run: docker compose config --quiet
+        env:
+          POSTGRES_PASSWORD: senha-apenas-para-validacao-no-ci
+
+      - name: Build da imagem Docker
+        run: docker build --build-arg APP_VERSION=ci -t todo-api:ci .
+
+      - name: Subir o container e validar /health (smoke test da imagem)
         run: |
-          docker build -t todo-api:${{ github.sha }} .
+          docker run -d --name todo-api-ci -p 5000:5000 todo-api:ci
+          trap 'docker logs todo-api-ci; docker rm -f todo-api-ci' EXIT
+          curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused --retry-all-errors \
+               http://localhost:5000/health
